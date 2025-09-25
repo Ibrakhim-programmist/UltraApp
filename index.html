@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Tower Defense Lite</title>
+    <style>
+        :root{--bg:#0b1220;--panel:#0f1724;--accent:#10b981;--muted:#9fb3d6;--text:#e6eef8}
+        *{box-sizing:border-box}
+        body{margin:0;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;background:linear-gradient(180deg,#071426,#061427);font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:var(--text)}
+        .ui{width:360px;padding:16px;margin:20px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.03));box-shadow:0 10px 30px rgba(2,6,23,0.6)}
+        canvas{background:#071427;border-radius:10px;display:block;margin:20px}
+        h1{font-size:18px;margin:0 0 10px}
+        .row{display:flex;gap:8px;align-items:center}
+        button{background:var(--accent);border:0;padding:8px 10px;border-radius:8px;color:#012;cursor:pointer;font-weight:700}
+        .muted{color:var(--muted);font-size:13px}
+        .stat{display:flex;justify-content:space-between;margin:6px 0}
+        .small{font-size:13px}
+        .tower-btn{width:100%;padding:8px;border-radius:8px;border:2px solid transparent;background:linear-gradient(90deg,#1f2937,#111827);color:var(--text);cursor:pointer}
+        .tower-btn.selected{border-color:var(--accent);box-shadow:0 6px 18px rgba(16,185,129,0.12)}
+        .footer{margin-top:10px;color:var(--muted);font-size:12px}
+    </style>
+</head>
+<body>
+<div style="display:flex;gap:20px;align-items:flex-start">
+    <canvas id="game" width="720" height="480"></canvas>
+    <aside class="ui" aria-label="Game UI">
+        <h1>Tower Defense Lite</h1>
+        <div class="stat"><div>Здоровье базы</div><div id="hp">20</div></div>
+        <div class="stat"><div>Деньги</div><div id="money">100</div></div>
+        <div class="stat"><div>Волна</div><div id="wave">0</div></div>
+        <div style="margin-top:8px">
+            <button id="startWave">Начать волну</button>
+        </div>
+        <hr style="margin:12px 0;border:none;border-top:1px solid rgba(255,255,255,0.03)">
+        <div class="small">Выбор башни</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="tower-btn" data-type="basic" id="t-basic">Пушка<br><span class="muted">Цена 50</span></button>
+            <button class="tower-btn" data-type="sniper" id="t-sniper">Снайпер<br><span class="muted">Цена 100</span></button>
+        </div>
+        <div class="muted footer">Клик на поле — поставить башню (если выбрана). Удерживай Shift при установке, чтобы отменить выделение.</div>
+        <div style="margin-top:8px"><button id="sellMode">Режим продажи: выкл</button></div>
+    </aside>
+</div>
+
+<script>
+    // Simple Tower Defense Lite — single file
+    (() => {
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+        const tile = 40; // grid size
+        const cols = Math.floor(canvas.width / tile);
+        const rows = Math.floor(canvas.height / tile);
+
+        // Path: array of grid points (x,y) enemies will follow
+        const path = [
+            {x:0,y:6},{x:5,y:6},{x:5,y:3},{x:12,y:3},{x:12,y:9},{x:18,y:9}
+        ];
+
+        // Game state
+        let towers = []; // {x,y,type,fireCooldown}
+        let bullets = []; // {x,y,dx,dy,spd,dmg}
+        let enemies = []; // {x,y,hp,maxHp,speed,pathIndex}
+        let money = 100, baseHP = 20, wave = 0;
+        let selectedTowerType = null;
+        let sellMode = false;
+        let spawning = false;
+        let spawnInterval = null;
+
+        // Tower definitions
+        const TOWERS = {
+            basic: {price:50,range:100,rate:0.6,damage:6,bulletSpeed:6, color:'#60a5fa'},
+            sniper:{price:100,range:240,rate:1.6,damage:24,bulletSpeed:10,color:'#f472b6'}
+        };
+
+        // Drawing helpers
+        function drawGrid(){
+            ctx.fillStyle = '#071427';
+            ctx.fillRect(0,0,canvas.width,canvas.height);
+            ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+            for(let i=0;i<=cols;i++) ctx.strokeRect(i*tile,0,0,canvas.height);
+            for(let j=0;j<=rows;j++) ctx.strokeRect(0,j*tile,canvas.width,0);
+        }
+
+        function drawPath(){
+            ctx.beginPath();
+            ctx.lineWidth = tile*0.6;
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = '#2b3340';
+            ctx.moveTo(path[0].x*tile + tile/2, path[0].y*tile + tile/2);
+            for(let p of path) ctx.lineTo(p.x*tile + tile/2, p.y*tile + tile/2);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+        }
+
+        function worldToPixel(g){ return {x: g.x*tile + tile/2, y: g.y*tile + tile/2}; }
+
+        function spawnEnemyWave(count){
+            for(let i=0;i<count;i++){
+                setTimeout(()=>{
+                    enemies.push({x:path[0].x*tile + tile/2, y:path[0].y*tile + tile/2, hp:20 + wave*6, maxHp:20 + wave*6, speed:0.6 + wave*0.03, pathIndex:0});
+                }, i*700);
+            }
+        }
+
+        function update(dt){
+            // enemies movement
+            for(let e of enemies){
+                const targetPoint = worldToPixel(path[e.pathIndex+1] || path[e.pathIndex]);
+                const tx = targetPoint.x, ty = targetPoint.y;
+                const dx = tx - e.x, dy = ty - e.y;
+                const dist = Math.hypot(dx,dy);
+                if(dist < 2){
+                    if(e.pathIndex < path.length-1) e.pathIndex++;
+                    else { baseHP--; e.dead=true; continue; }
+                } else {
+                    e.x += (dx/dist) * e.speed * dt;
+                    e.y += (dy/dist) * e.speed * dt;
+                }
+            }
+            enemies = enemies.filter(e=>!e.dead);
+
+            // towers shooting
+            for(let t of towers){
+                t.fireCooldown -= dt;
+                if(t.fireCooldown <= 0){
+                    // find nearest enemy in range
+                    let best = null, bestDist=Infinity;
+                    for(let e of enemies){
+                        const d = Math.hypot(e.x - (t.x*tile+tile/2), e.y - (t.y*tile+tile/2));
+                        if(d <= TOWERS[t.type].range && d < bestDist){ best = e; bestDist=d; }
+                    }
+                    if(best){
+                        // shoot
+                        const px = t.x*tile+tile/2, py = t.y*tile+tile/2;
+                        const ang = Math.atan2(best.y-py, best.x-px);
+                        bullets.push({x:px,y:py,dx:Math.cos(ang),dy:Math.sin(ang),spd:TOWERS[t.type].bulletSpeed, dmg:TOWERS[t.type].damage});
+                        t.fireCooldown = TOWERS[t.type].rate;
+                    }
+                }
+            }
+
+            // bullets
+            for(let b of bullets){
+                b.x += b.dx * b.spd * dt;
+                b.y += b.dy * b.spd * dt;
+                // check collision
+                for(let e of enemies){
+                    if(Math.hypot(e.x-b.x,e.y-b.y) < 12){ e.hp -= b.dmg; b.hit=true; if(e.hp<=0){ e.dead=true; money += 8 + Math.floor(wave*0.5); } break; }
+                }
+            }
+            bullets = bullets.filter(b=>!b.hit && b.x>0 && b.x<canvas.width && b.y>0 && b.y<canvas.height);
+
+            // remove dead enemies
+            enemies = enemies.filter(e=>!e.dead);
+
+            // game over check
+            if(baseHP <= 0){ running=false; alert('Игра окончена — база разрушена. Волна: '+wave); resetGame(); }
+        }
+
+        function draw(){
+            drawGrid();
+            drawPath();
+            // draw towers
+            for(let t of towers){
+                const px=t.x*tile+tile/2, py=t.y*tile+tile/2;
+                ctx.fillStyle = TOWERS[t.type].color;
+                ctx.beginPath(); ctx.arc(px,py,12,0,Math.PI*2); ctx.fill();
+            }
+            // draw enemies
+            for(let e of enemies){
+                ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(e.x,e.y,10,0,Math.PI*2); ctx.fill();
+                // hp bar
+                ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(e.x-16,e.y-18,32,5);
+                ctx.fillStyle='#10b981'; ctx.fillRect(e.x-16,e.y-18,32*(e.hp/e.maxHp),5);
+            }
+            // bullets
+            for(let b of bullets){ ctx.fillStyle='#ffd166'; ctx.beginPath(); ctx.arc(b.x,b.y,4,0,Math.PI*2); ctx.fill(); }
+
+            // HUD
+            document.getElementById('money').textContent = money;
+            document.getElementById('hp').textContent = baseHP;
+            document.getElementById('wave').textContent = wave;
+        }
+
+        let last = performance.now();
+        let running = true;
+        function loop(ts){
+            const dt = (ts - last) / 16.666; // normalize to 60fps units
+            last = ts;
+            if(running){ update(dt); draw(); requestAnimationFrame(loop); }
+        }
+
+        // Input & placement
+        canvas.addEventListener('click', (ev)=>{
+            const rect = canvas.getBoundingClientRect();
+            const gx = Math.floor((ev.clientX - rect.left)/tile);
+            const gy = Math.floor((ev.clientY - rect.top)/tile);
+            // check if on path
+            for(let p of path){ if(p.x===gx && p.y===gy) { return; } }
+            // if sell mode, remove tower
+            if(sellMode){
+                const idx = towers.findIndex(t=>t.x===gx && t.y===gy);
+                if(idx>=0){ money += Math.floor(TOWERS[towers[idx].type].price * 0.6); towers.splice(idx,1); document.getElementById('sellMode').textContent='Режим продажи: выкл'; sellMode=false; return; }
+            }
+            if(!selectedTowerType) return;
+            // check occupied
+            if(towers.some(t=>t.x===gx && t.y===gy)) return;
+            const price = TOWERS[selectedTowerType].price;
+            if(money < price) { alert('Недостаточно денег'); return; }
+            towers.push({x:gx,y:gy,type:selectedTowerType,fireCooldown:0});
+            money -= price;
+            // if shift held, keep selection; else clear
+            // (we can't check shift after click easily; use selection toggle: hold shift when clicking UI - but for simplicity skip)
+            // deselect
+            document.querySelectorAll('.tower-btn').forEach(b=>b.classList.remove('selected'));
+            selectedTowerType = null;
+        });
+
+        // UI buttons
+        document.getElementById('startWave').addEventListener('click', ()=>{
+            wave++; spawnEnemyWave(6 + wave*2);
+        });
+        document.getElementById('t-basic').addEventListener('click', (e)=>{ selectedTowerType = 'basic'; document.querySelectorAll('.tower-btn').forEach(b=>b.classList.remove('selected')); e.currentTarget.classList.add('selected'); });
+        document.getElementById('t-sniper').addEventListener('click', (e)=>{ selectedTowerType = 'sniper'; document.querySelectorAll('.tower-btn').forEach(b=>b.classList.remove('selected')); e.currentTarget.classList.add('selected'); });
+        document.getElementById('sellMode').addEventListener('click', (e)=>{ sellMode = !sellMode; e.currentTarget.textContent = 'Режим продажи: ' + (sellMode? 'вкл':'выкл'); if(sellMode) { document.querySelectorAll('.tower-btn').forEach(b=>b.classList.remove('selected')); selectedTowerType=null;} });
+
+        function resetGame(){ towers=[];bullets=[];enemies=[];money=100;baseHP=20;wave=0;selectedTowerType=null;document.querySelectorAll('.tower-btn').forEach(b=>b.classList.remove('selected')); }
+
+        // Start loop
+        requestAnimationFrame(loop);
+    })();
+</script>
+<button ><a href="/second" style="text-decoration: none; color: white">Next to Calculator</a></button>
+<button ><a href="/third" style="text-decoration: none; color: yellow;text-align: center">Next to Birdy</a></button>
+
+</body>
+</html>
